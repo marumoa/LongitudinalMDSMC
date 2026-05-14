@@ -1,0 +1,115 @@
+
+rm(list = ls())
+gc()
+
+library(tidyverse)
+
+# =========================================================
+# 1. Pass
+# =========================================================
+file_path <- "/Users/marumoatsushi/Desktop/研究・発表2013~/2025Matteo/Data/AM/Fig2C.csv"
+
+df <- read.csv(file_path, check.names = FALSE)
+
+# =========================================================
+# 2.Organize
+# =========================================================
+colnames(df)
+# Cluster-Diagnosis, Cluster-Progression
+
+df <- df %>%
+  rename(
+    Diagnosis   = `Cluster-Diagnosis`,
+    Progression = `Cluster-Progression`
+  )
+
+# =========================================================
+# 3. Count
+# =========================================================
+df_count <- df %>%
+  count(Diagnosis, Progression)
+
+# =========================================================
+# 4. Ratio（Diagnosisごと）
+# =========================================================
+df_prop <- df_count %>%
+  group_by(Diagnosis) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+
+# =========================================================
+# 5. Matrix
+# =========================================================
+all_clusters <- sort(unique(c(df$Diagnosis, df$Progression)))
+
+df_full <- expand.grid(
+  Diagnosis = all_clusters,
+  Progression = all_clusters
+) %>%
+  left_join(df_prop, by = c("Diagnosis", "Progression")) %>%
+  mutate(
+    proportion = ifelse(is.na(proportion), 0, proportion)
+  )
+
+# =========================================================
+# 6. Order
+# =========================================================
+df_full$Diagnosis   <- factor(df_full$Diagnosis, levels = all_clusters)
+df_full$Progression <- factor(df_full$Progression, levels = all_clusters)
+
+# =========================================================
+# 7. Plot
+# =========================================================
+p <- ggplot(df_full, aes(x = Progression, y = Diagnosis)) +
+  
+  # ---- Heatmap ----
+geom_tile(aes(fill = proportion), color = "white", linewidth = 0.5) +
+  
+  # --------
+geom_text(
+  data = df_full %>% filter(proportion == 0),
+  label = "////",
+  color = "grey60",
+  size = 3
+) +
+  
+  # ---- Color----
+scale_fill_gradient(
+  low = "white",
+  high = "#b30000",
+  limits = c(0,1),
+  labels = scales::percent
+) +
+  
+  # ----axis----
+scale_y_discrete(limits = rev(levels(df_full$Diagnosis))) +
+  
+  labs(
+    x = "Progression",
+    y = "Diagnosis",
+    fill = "% Patients"
+  ) +
+  
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    legend.position = "right"
+  )
+
+# =========================================================
+# 8. Print
+# =========================================================
+print(p)
+
+# =========================================================
+# 9. Save
+# =========================================================
+ggsave(
+  "/Users/marumoatsushi/Desktop/研究・発表2013~/2025Matteo/Data/AM/Fig2C_heatmap.jpeg",
+  p,
+  width = 10,
+  height = 8,
+  dpi = 600
+)
