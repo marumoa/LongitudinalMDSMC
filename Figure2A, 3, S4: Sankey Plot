@@ -1,0 +1,151 @@
+rm(list = ls())
+gc()
+
+library(readr)
+library(dplyr)
+library(ggSankeyGrad)
+library(ggplot2)
+
+# ======================
+# Data
+# ======================
+file_path <- "/Users/marumoatsushi/BCOR/SankeyPlot/Matteo2.csv"
+
+df <- read_csv(file_path, show_col_types = FALSE) %>%
+  transmute(
+    Diagnosis   = as.character(`Cluster-Diagnosis`),
+    Progression = as.character(`Cluster-Progression`)
+  )
+
+# ======================
+# Order
+# ======================
+diag_order <- df %>%
+  count(Diagnosis) %>%
+  arrange(desc(n)) %>%
+  pull(Diagnosis) %>%
+  rev()
+
+prog_order <- df %>%
+  count(Progression) %>%
+  arrange(desc(n)) %>%
+  pull(Progression) %>%
+  rev()
+
+df <- df %>%
+  mutate(
+    Diagnosis   = factor(Diagnosis, levels = diag_order),
+    Progression = factor(Progression, levels = prog_order)
+  )
+
+# ======================
+# Sum
+# ======================
+df_sum <- df %>%
+  count(Diagnosis, Progression)
+
+# ======================
+# Color
+# ======================
+cluster_colors <- c(
+  "1"  = "#7b3294",   
+  "2"  = "#2c7fb8",   
+  "3"  = "#1a9850",   
+  "4"  = "#fdbf11",   
+  "5"  = "#e31a1c",   
+  "6"  = "#b15928",   
+  "7"  = "#b2dfdb",   
+  "8"  = "#80b1d3",   
+  "9"  = "#9e9e9e",   
+  "10" = "#ffff33",   
+  "11" = "#ff1493",   
+  "12" = "#00e64d",   
+  "13" = "#e5c494",   
+  "14" = "#f2b6e0"    
+)
+df_sum <- df_sum %>%
+  mutate(
+    col1 = cluster_colors[as.character(Diagnosis)],
+    col2 = cluster_colors[as.character(Progression)]
+  )
+
+# ======================
+# Sankey
+# ======================
+p <- ggSankeyGrad(
+  c1     = df_sum$Diagnosis,
+  c2     = df_sum$Progression,
+  col1   = df_sum$col1,
+  col2   = df_sum$col2,
+  values = df_sum$n,
+  label  = FALSE
+)
+
+# ======================
+# Label
+# ======================
+left_labels <- df %>%
+  count(Diagnosis) %>%
+  mutate(y = cumsum(n) - n/2)
+
+right_labels <- df %>%
+  count(Progression) %>%
+  mutate(y = cumsum(n) - n/2)
+
+# ======================
+# Plot
+# ======================
+final_plot <- p +
+  geom_text(
+    data = left_labels,
+    aes(x = -0.03, y = y, label = Diagnosis),  # 外側
+    hjust = 1,
+    size = 3.5,
+    fontface = "bold"
+  ) +
+  geom_text(
+    data = right_labels,
+    aes(x = 1.03, y = y, label = Progression), # 外側
+    hjust = 0,
+    size = 3.5,
+    fontface = "bold"
+  ) +
+  theme_void() +
+  theme(
+    plot.margin = margin(20, 60, 20, 60),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+# ======================
+# Print
+# ======================
+print(final_plot)
+
+# ======================
+# Save
+# ======================
+ggsave(
+  "Figure2_sankey.jpg",
+  plot = final_plot,
+  width = 8,
+  height = 6,
+  units = "in",
+  dpi = 600,
+  device = "jpeg",
+  quality = 100,
+  bg = "white"
+)
+
+# ======================
+# Save, TIFF
+# ======================
+ggsave(
+  "Figure2_sankey.tiff",
+  plot = final_plot,
+  width = 8,
+  height = 6,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
