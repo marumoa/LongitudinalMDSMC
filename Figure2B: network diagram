@@ -1,0 +1,235 @@
+rm(list = ls())
+gc()
+
+# =========================================================
+# 1. Library
+# =========================================================
+library(tidyverse)
+library(igraph)
+library(ggraph)
+library(grid)
+library(viridis)
+
+if("package:plyr" %in% search()){
+  detach("package:plyr", unload=TRUE)
+}
+
+# =========================================================
+# 2. Pass
+# =========================================================
+base_dir <- "/Users/"
+
+mut_file <- file.path(base_dir, "mutation.csv")
+ms_file  <- file.path(base_dir, "MS.csv")
+
+# =========================================================
+# 3. Load
+# =========================================================
+mut <- read.csv(mut_file, check.names = FALSE)
+ms  <- read.csv(ms_file)
+
+colnames(mut) <- make.unique(colnames(mut))
+
+if(!"MRN" %in% colnames(mut)){
+  mut$MRN <- mut[,1]
+}
+
+# =========================================================
+# 4. Merge
+# =========================================================
+df <- dplyr::inner_join(mut, ms, by = "MRN")
+
+# =========================================================
+# 5. Organize
+# =========================================================
+df <- df %>%
+  mutate(
+    MCDig = as.numeric(MCDig),
+    MCPro = as.numeric(MCPro),
+    PFS   = as.numeric(PFS)
+  )
+
+mut_cols <- setdiff(colnames(mut), "MRN")
+df[mut_cols] <- lapply(df[mut_cols], as.numeric)
+
+# =========================================================
+# 6. Nodesize
+# =========================================================
+cluster_size <- df %>%
+  group_by(MCDig) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(name = as.character(MCDig))
+
+# =========================================================
+# 6.5 Cluster
+# =========================================================
+cluster_total <- df %>%
+  group_by(MCDig) %>%
+  summarise(total = n(), .groups = "drop") %>%
+  mutate(from = as.character(MCDig))
+
+# =========================================================
+# 7. Edge
+# =========================================================
+edges <- df %>%
+  group_by(from = MCDig, to = MCPro) %>%
+  summarise(
+    count = n(),
+    PFS = median(PFS, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    from = as.character(from),
+    to   = as.character(to)
+  ) %>%
+  left_join(cluster_total[, c("from", "total")], by = "from") %>%
+  mutate(
+    proportion = count / total,
+    
+    prop_cat = case_when(
+      proportion < 0.4 ~ "0.2",
+      proportion < 0.8 ~ "0.6",
+      TRUE ~ "1.0"
+    ),
+    
+    alpha_plot = scales::rescale(count, to = c(0.4, 1))
+  )
+
+# =========================================================
+# 8. Layout
+# =========================================================
+g_tmp <- graph_from_data_frame(edges, directed = TRUE)
+
+set.seed(42)
+
+layout_mat <- layout_with_fr(
+  g_tmp,
+  niter = 1000,
+  grid = "nogrid"
+)
+
+layout_df <- data.frame(
+  name = V(g_tmp)$name,
+  x = layout_mat[,1],
+  y = layout_mat[,2]
+)
+
+layout_df$x <- layout_df$x * 1.6
+layout_df$y <- layout_df$y * 1.4
+
+layout_df <- left_join(layout_df, cluster_size[,c("name","n")], by="name")
+
+# =========================================================
+# 9. Graph
+# =========================================================
+g <- graph_from_data_frame(edges, directed = TRUE, vertices = layout_df)
+
+# =========================================================
+# 10. Color
+# =========================================================
+cluster_colors <- c(
+  "1"="#7b3294","2"="#2c7fb8","3"="#1a9850","4"="#fdbf11",
+  "5"="#e31a1c","6"="#b15928","7"="#b2dfdb","8"="#80b1d3",
+  "9"="#9e9e9e","10"="#ffff33","11"="#ff1493",
+  "12"="#00e64d","13"="#e5c494","14"="#f2b6e0"
+)
+
+# =========================================================
+# 11. Plot
+# =========================================================
+p <- ggraph(g, layout = "manual",
+            x = layout_df$x,
+            y = layout_df$y) +
+  
+geom_edge_arc(
+  aes(width = prop_cat,
+      color = PFS,
+      alpha = alpha_plot,
+      filter = from != to),
+  arrow = arrow(length = unit(3.5, "mm"), type = "closed"),
+  arrow.fill = "black",
+  end_cap = circle(3, "mm"),
+  strength = 0.25
+) +
+  
+geom_edge_loop(
+  aes(width = prop_cat,
+      color = PFS,
+      alpha = alpha_plot,
+      filter = from == to),
+  arrow = arrow(length = unit(3, "mm"), type = "closed"),
+  arrow.fill = "black",
+  strength = 0.7,
+  span = 1.3
+) +
+  
+geom_node_point(
+  aes(size = n, fill = name),
+  shape = 22,
+  color = "black",
+  alpha = 0.6
+) +
+  
+geom_node_text(
+  aes(label = name,
+      color = ifelse(name == "10","black","white")),
+  size = 5,
+  fontface = "bold",
+  show.legend = FALSE
+) +
+  
+  scale_color_identity() +
+  scale_fill_manual(values = cluster_colors, guide = "none") +
+  
+scale_edge_color_gradientn(
+  colors = viridis::viridis(100, option = "plasma"),
+  name = "Median PFS"
+) +
+  
+scale_edge_width_manual(
+  values = c("0.2" = 1.5, "0.6" = 3, "1.0" = 5),
+  name = "Transition proportion",
+  breaks = c("0.2","0.6","1.0")
+) +
+  
+scale_edge_alpha(
+  range = c(0.4, 1),
+  name = "Transition count"
+) +
+  
+scale_size(
+  range = c(6, 20),
+  name = "Number of patients"
+) +
+  
+  guides(
+    edge_width = guide_legend(
+      override.aes = list(
+        arrow = NULL,
+        colour = "black",
+        alpha = 1
+      )
+    )
+  ) +
+  
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.margin = ggplot2::margin(30,30,30,30)
+  )
+
+# =========================================================
+# 12. Print
+# =========================================================
+print(p)
+
+# =========================================================
+# 13. Save
+# =========================================================
+ggsave(
+  file.path(base_dir, "FINAL_TRANSITION_NETWORK_FINAL_FIXED.jpeg"),
+  p,
+  width = 16,
+  height = 10,
+  dpi = 600
+)
