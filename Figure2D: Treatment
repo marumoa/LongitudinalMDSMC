@@ -1,0 +1,152 @@
+rm(list = ls())
+gc()
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(writexl)
+
+base_dir <- "/Users/marumoatsushi/Desktop/研究・発表2013~/2026MLMatteo/Data/Cluster"
+input_file <- file.path(base_dir, "20260811Treatment.xlsx")
+
+raw <- read_excel(input_file, sheet = 1)
+names(raw) <- trimws(names(raw))
+
+df <- raw %>%
+  transmute(
+    MC_DIAGNOSIS = as.integer(`MC DIAGNOSIS`),
+    treatment_code = as.integer(.[[3]])
+  ) %>%
+  filter(!is.na(MC_DIAGNOSIS), !is.na(treatment_code))
+
+treatment_levels <- c(1, 2, 3, 4)
+treatment_labels <- c(
+  "1" = "SCT",
+  "2" = "Chemo(NoSCT)",
+  "3" = "Supportive",
+  "4" = "NA"
+)
+
+cluster_levels <- sort(unique(df$MC_DIAGNOSIS))
+
+summary_counts <- df %>%
+  count(MC_DIAGNOSIS, treatment_code, name = "patients") %>%
+  complete(
+    MC_DIAGNOSIS = cluster_levels,
+    treatment_code = treatment_levels,
+    fill = list(patients = 0)
+  ) %>%
+  group_by(MC_DIAGNOSIS) %>%
+  mutate(
+    cluster_total = sum(patients),
+    proportion = ifelse(cluster_total > 0, patients / cluster_total, NA_real_),
+    percent = proportion * 100
+  ) %>%
+  ungroup() %>%
+  mutate(
+    MC_label = paste0("MC", MC_DIAGNOSIS),
+    treatment_code = factor(treatment_code, levels = treatment_levels),
+    treatment = factor(
+      treatment_labels[as.character(treatment_code)],
+      levels = treatment_labels[as.character(treatment_levels)]
+    )
+  ) %>%
+  arrange(MC_DIAGNOSIS, treatment_code)
+
+plot_data <- summary_counts %>%
+  mutate(MC_label = factor(MC_label, levels = paste0("MC", cluster_levels)))
+
+n_labels <- summary_counts %>%
+  distinct(MC_DIAGNOSIS, MC_label, cluster_total) %>%
+  mutate(
+    MC_label = factor(MC_label, levels = paste0("MC", cluster_levels)),
+    label = paste0("n=", cluster_total)
+  )
+
+treatment_colors <- c(
+  "SCT" = "#1f78b4",
+  "Chemo(NoSCT)" = "#33a02c",
+  "Supportive" = "#ff7f00",
+  "NA" = "#bdbdbd"
+)
+
+p <- ggplot(plot_data, aes(x = MC_label, y = proportion, fill = treatment)) +
+  geom_col(width = 0.75, color = "white", linewidth = 0.25) +
+  geom_text(
+    data = n_labels,
+    aes(x = MC_label, y = 1.025, label = label),
+    inherit.aes = FALSE,
+    size = 3.2,
+    vjust = 0
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = c(0, 1.08),
+    breaks = seq(0, 1, by = 0.25),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(values = treatment_colors, name = "Treatment") +
+  labs(
+    x = "MC DIAGNOSIS",
+    y = "Patients (%)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.text.x = element_text(size = 11, angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 11),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    legend.position = "right",
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11),
+    plot.margin = margin(12, 20, 12, 12)
+  )
+
+print(p)
+
+output_jpeg <- file.path(base_dir, "20260811Treatment_MC_DIAGNOSIS_treatment_proportion_barplot.jpeg")
+output_tiff <- file.path(base_dir, "20260811Treatment_MC_DIAGNOSIS_treatment_proportion_barplot.tiff")
+output_csv <- file.path(base_dir, "20260811Treatment_MC_DIAGNOSIS_treatment_proportion_summary.csv")
+output_xlsx <- file.path(base_dir, "20260811Treatment_MC_DIAGNOSIS_treatment_proportion_summary.xlsx")
+
+ggsave(
+  output_jpeg,
+  p,
+  width = 10,
+  height = 6,
+  dpi = 600
+)
+
+ggsave(
+  output_tiff,
+  p,
+  width = 10,
+  height = 6,
+  dpi = 600,
+  compression = "lzw"
+)
+
+write.csv(summary_counts, output_csv, row.names = FALSE)
+
+qc <- tibble(
+  item = c("input_rows", "valid_rows_used", "clusters", "treatment_codes"),
+  value = c(
+    as.character(nrow(raw)),
+    as.character(nrow(df)),
+    paste(cluster_levels, collapse = ","),
+    paste(treatment_levels, collapse = ",")
+  )
+)
+
+write_xlsx(
+  list(
+    Treatment_Proportions = summary_counts,
+    QC = qc
+  ),
+  output_xlsx
+)
+
+print(summary_counts)
+print(qc)
