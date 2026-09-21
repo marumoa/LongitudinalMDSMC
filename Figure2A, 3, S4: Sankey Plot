@@ -3,129 +3,273 @@ gc()
 
 library(readr)
 library(dplyr)
-library(ggSankeyGrad)
+library(tidyr)
 library(ggplot2)
+library(grid)
+
+# ======================
+# Paths
+# ======================
+base_dir <- "/Users/marumoatsushi/MC/SankeyData"
+file_path <- file.path(base_dir, "Sankey.csv")
 
 # ======================
 # Data
+# Diagnosis -> Progression uses all evaluable cases.
+# Progression -> FU2 uses only cases with an available FU2.
 # ======================
-file_path <- "/Users/marumoatsushi/BCOR/SankeyPlot/Matteo2.csv"
-
-df <- read_csv(file_path, show_col_types = FALSE) %>%
+df_raw <- read_csv(
+  file_path,
+  show_col_types = FALSE,
+  col_types = cols(.default = col_character())
+) %>%
   transmute(
-    Diagnosis   = as.character(`Cluster-Diagnosis`),
-    Progression = as.character(`Cluster-Progression`)
-  )
+    MRN       = as.character(MRN),
+    Diagnosis = as.character(`MC DIAGNOSIS`),
+    FU1       = as.character(`MC FU`),
+    FU2       = as.character(`MC FU2`)
+  ) %>%
+  mutate(across(everything(), ~ trimws(replace_na(.x, ""))))
+
+df_all <- df_raw %>%
+  filter(MRN != "", Diagnosis != "", FU1 != "")
+
+df_fu2 <- df_all %>%
+  filter(FU2 != "")
 
 # ======================
-# Order
-# ======================
-diag_order <- df %>%
-  count(Diagnosis) %>%
-  arrange(desc(n)) %>%
-  pull(Diagnosis) %>%
-  rev()
-
-prog_order <- df %>%
-  count(Progression) %>%
-  arrange(desc(n)) %>%
-  pull(Progression) %>%
-  rev()
-
-df <- df %>%
-  mutate(
-    Diagnosis   = factor(Diagnosis, levels = diag_order),
-    Progression = factor(Progression, levels = prog_order)
-  )
-
-# ======================
-# Sum
-# ======================
-df_sum <- df %>%
-  count(Diagnosis, Progression)
-
-# ======================
-# Color
+# Colors
 # ======================
 cluster_colors <- c(
-  "1"  = "#7b3294",   
-  "2"  = "#2c7fb8",   
-  "3"  = "#1a9850",   
-  "4"  = "#fdbf11",   
-  "5"  = "#e31a1c",   
-  "6"  = "#b15928",   
-  "7"  = "#b2dfdb",   
-  "8"  = "#80b1d3",   
-  "9"  = "#9e9e9e",   
-  "10" = "#ffff33",   
-  "11" = "#ff1493",   
-  "12" = "#00e64d",   
-  "13" = "#e5c494",   
-  "14" = "#f2b6e0"    
+  "1"  = "#7b3294",
+  "2"  = "#2c7fb8",
+  "3"  = "#1a9850",
+  "4"  = "#fdbf11",
+  "5"  = "#e31a1c",
+  "6"  = "#b15928",
+  "7"  = "#b2dfdb",
+  "8"  = "#80b1d3",
+  "9"  = "#9e9e9e",
+  "10" = "#ffff33",
+  "11" = "#ff1493",
+  "12" = "#00e64d",
+  "13" = "#e5c494",
+  "14" = "#f2b6e0"
 )
-df_sum <- df_sum %>%
+
+make_levels <- function(x) {
+  x %>%
+    as.character() %>%
+    table() %>%
+    sort(decreasing = TRUE) %>%
+    names() %>%
+    rev()
+}
+
+diag_order <- make_levels(df_all$Diagnosis)
+fu1_order  <- make_levels(df_all$FU1)
+fu2_order  <- make_levels(df_fu2$FU2)
+
+df_all <- df_all %>%
   mutate(
-    col1 = cluster_colors[as.character(Diagnosis)],
-    col2 = cluster_colors[as.character(Progression)]
+    Diagnosis = factor(Diagnosis, levels = diag_order),
+    FU1       = factor(FU1, levels = fu1_order),
+    FU2       = factor(FU2, levels = fu2_order)
+  )
+
+df_fu2 <- df_fu2 %>%
+  mutate(
+    Diagnosis = factor(Diagnosis, levels = diag_order),
+    FU1       = factor(FU1, levels = fu1_order),
+    FU2       = factor(FU2, levels = fu2_order)
   )
 
 # ======================
-# Sankey
+# Geometry helpers
 # ======================
-p <- ggSankeyGrad(
-  c1     = df_sum$Diagnosis,
-  c2     = df_sum$Progression,
-  col1   = df_sum$col1,
-  col2   = df_sum$col2,
-  values = df_sum$n,
-  label  = FALSE
+node_gap <- 0.35
+node_width <- 0
+gradient_steps <- 90
+flow_alpha <- 0.58
+
+smoothstep <- function(t) {
+  t * t * (3 - 2 * t)
+}
+
+alpha_hex <- function(hex, alpha = 1) {
+  rgb <- grDevices::col2rgb(hex) / 255
+  grDevices::rgb(rgb[1], rgb[2], rgb[3], alpha = alpha)
+}
+
+mix_hex <- function(col1, col2, t, alpha = 1) {
+  rgb1 <- grDevices::col2rgb(col1) / 255
+  rgb2 <- grDevices::col2rgb(col2) / 255
+  rgb <- rgb1 * (1 - t) + rgb2 * t
+  grDevices::rgb(rgb[1], rgb[2], rgb[3], alpha = alpha)
+}
+
+make_nodes <- function(dat, col_name, axis_x, levels_vec) {
+  counts <- dat %>%
+    count(.data[[col_name]], name = "n") %>%
+    rename(stratum = 1)
+
+  tibble(stratum = factor(levels_vec, levels = levels_vec)) %>%
+    left_join(counts, by = "stratum") %>%
+    mutate(n = replace_na(n, 0)) %>%
+    arrange(stratum) %>%
+    mutate(
+      ymin = cumsum(lag(n + node_gap, default = 0)),
+      ymax = ymin + n,
+      ymid = (ymin + ymax) / 2,
+      x = axis_x,
+      fill = alpha_hex(cluster_colors[as.character(stratum)], 0.88)
+    )
+}
+
+allocate_pair <- function(dat, from_col, to_col, from_nodes, to_nodes, from_levels, to_levels) {
+  flows <- dat %>%
+    count(.data[[from_col]], .data[[to_col]], name = "n") %>%
+    rename(from = 1, to = 2) %>%
+    mutate(
+      from = factor(from, levels = from_levels),
+      to   = factor(to, levels = to_levels)
+    ) %>%
+    arrange(from, to)
+
+  from_offsets <- flows %>%
+    group_by(from) %>%
+    arrange(to, .by_group = TRUE) %>%
+    mutate(
+      from_ymin_rel = cumsum(lag(n, default = 0)),
+      from_ymax_rel = from_ymin_rel + n
+    ) %>%
+    ungroup() %>%
+    select(from, to, from_ymin_rel, from_ymax_rel)
+
+  to_offsets <- flows %>%
+    group_by(to) %>%
+    arrange(from, .by_group = TRUE) %>%
+    mutate(
+      to_ymin_rel = cumsum(lag(n, default = 0)),
+      to_ymax_rel = to_ymin_rel + n
+    ) %>%
+    ungroup() %>%
+    select(from, to, to_ymin_rel, to_ymax_rel)
+
+  flows %>%
+    left_join(from_offsets, by = c("from", "to")) %>%
+    left_join(to_offsets, by = c("from", "to")) %>%
+    left_join(from_nodes %>% select(from = stratum, from_ymin = ymin, from_x = x), by = "from") %>%
+    left_join(to_nodes %>% select(to = stratum, to_ymin = ymin, to_x = x), by = "to") %>%
+    mutate(
+      y0_low  = from_ymin + from_ymin_rel,
+      y0_high = from_ymin + from_ymax_rel,
+      y1_low  = to_ymin + to_ymin_rel,
+      y1_high = to_ymin + to_ymax_rel,
+      x0 = from_x + node_width / 2,
+      x1 = to_x - node_width / 2,
+      col0 = cluster_colors[as.character(from)],
+      col1 = cluster_colors[as.character(to)]
+    )
+}
+
+make_gradient_ribbons <- function(flows, segment_name) {
+  pieces <- vector("list", nrow(flows) * gradient_steps)
+  k <- 1
+  for (i in seq_len(nrow(flows))) {
+    f <- flows[i, ]
+    for (s in seq_len(gradient_steps)) {
+      t0 <- (s - 1) / gradient_steps
+      t1 <- s / gradient_steps
+      tt0 <- smoothstep(t0)
+      tt1 <- smoothstep(t1)
+
+      x0 <- f$x0 + (f$x1 - f$x0) * t0
+      x1 <- f$x0 + (f$x1 - f$x0) * t1
+      yl0 <- f$y0_low + (f$y1_low - f$y0_low) * tt0
+      yh0 <- f$y0_high + (f$y1_high - f$y0_high) * tt0
+      yl1 <- f$y0_low + (f$y1_low - f$y0_low) * tt1
+      yh1 <- f$y0_high + (f$y1_high - f$y0_high) * tt1
+
+      pieces[[k]] <- tibble(
+        group = paste(segment_name, i, s, sep = "_"),
+        x = c(x0, x1, x1, x0),
+        y = c(yl0, yl1, yh1, yh0),
+        fill = mix_hex(f$col0, f$col1, (t0 + t1) / 2, alpha = flow_alpha)
+      )
+      k <- k + 1
+    }
+  }
+  bind_rows(pieces)
+}
+
+# ======================
+# Build plot data
+# ======================
+nodes1 <- make_nodes(df_all, "Diagnosis", 1, diag_order)
+nodes2 <- make_nodes(df_all, "FU1", 2, fu1_order)
+nodes3 <- make_nodes(df_fu2, "FU2", 3, fu2_order)
+
+flows12 <- allocate_pair(df_all, "Diagnosis", "FU1", nodes1, nodes2, diag_order, fu1_order)
+flows23 <- allocate_pair(df_fu2, "FU1", "FU2", nodes2, nodes3, fu1_order, fu2_order)
+
+ribbons <- bind_rows(
+  make_gradient_ribbons(flows12, "diagnosis_to_progression"),
+  make_gradient_ribbons(flows23, "progression_to_after")
 )
 
-# ======================
-# Label
-# ======================
-left_labels <- df %>%
-  count(Diagnosis) %>%
-  mutate(y = cumsum(n) - n/2)
+nodes <- bind_rows(nodes1, nodes2, nodes3) %>%
+  mutate(
+    xmin = x - node_width / 2,
+    xmax = x + node_width / 2
+  )
 
-right_labels <- df %>%
-  count(Progression) %>%
-  mutate(y = cumsum(n) - n/2)
+max_y <- max(nodes$ymax)
+axis_y <- -max_y * 0.05
+label_y <- -max_y * 0.11
 
 # ======================
-# Plot
+# Plot: no cluster number labels and no stratum columns.
+# No FU2 is not shown; only the available FU2 cases flow to the third axis.
 # ======================
-final_plot <- p +
-  geom_text(
-    data = left_labels,
-    aes(x = -0.03, y = y, label = Diagnosis),  # 外側
-    hjust = 1,
-    size = 3.5,
-    fontface = "bold"
+final_plot <- ggplot() +
+  geom_polygon(
+    data = ribbons,
+    aes(x = x, y = y, group = group, fill = fill),
+    color = NA
   ) +
-  geom_text(
-    data = right_labels,
-    aes(x = 1.03, y = y, label = Progression), # 外側
-    hjust = 0,
-    size = 3.5,
-    fontface = "bold"
+  scale_fill_identity() +
+  annotate(
+    "segment",
+    x = 0.55, xend = 3.45,
+    y = axis_y, yend = axis_y,
+    linewidth = 1.2,
+    colour = "#9e9e9e",
+    arrow = arrow(length = unit(0.18, "inches"), type = "closed")
+  ) +
+  annotate("text", x = 1, y = label_y, label = "Diagnosis", fontface = "bold", size = 5.8) +
+  annotate("text", x = 2, y = label_y, label = "Progression", fontface = "bold", size = 5.8) +
+  annotate("text", x = 3, y = label_y, label = "After progression", fontface = "bold", size = 5.8) +
+  coord_cartesian(
+    xlim = c(0.45, 3.55),
+    ylim = c(label_y - max_y * 0.04, max_y + max_y * 0.02),
+    clip = "off"
   ) +
   theme_void() +
   theme(
-    plot.margin = margin(20, 60, 20, 60),
-    panel.background = element_rect(fill = "white", color = NA)
+    legend.position = "none",
+    plot.margin = margin(28, 44, 58, 44),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
   )
 
-# ======================
-# Print
-# ======================
 print(final_plot)
 
 # ======================
 # Save
 # ======================
 ggsave(
-  "Figure2_sankey.jpg",
+  file.path(base_dir, "Three_point_sankey.jpg"),
   plot = final_plot,
   width = 8,
   height = 6,
@@ -136,11 +280,8 @@ ggsave(
   bg = "white"
 )
 
-# ======================
-# Save, TIFF
-# ======================
 ggsave(
-  "Figure2_sankey.tiff",
+  file.path(base_dir, "Three_point_sanke.tiff"),
   plot = final_plot,
   width = 8,
   height = 6,
@@ -148,4 +289,36 @@ ggsave(
   dpi = 600,
   compression = "lzw",
   bg = "white"
+)
+
+# Overwrite the previous complete-case filenames as the current final figure.
+ggsave(
+  file.path(base_dir, "Three_point_sankey2.jpg"),
+  plot = final_plot,
+  width = 8,
+  height = 6,
+  units = "in",
+  dpi = 600,
+  device = "jpeg",
+  quality = 100,
+  bg = "white"
+)
+
+ggsave(
+  file.path(base_dir, "Three_point_sankey2.tiff"),
+  plot = final_plot,
+  width = 8,
+  height = 6,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+
+write_csv(
+  tibble(
+    dataset = c("diagnosis_to_progression", "progression_to_fu2"),
+    n = c(nrow(df_all), nrow(df_fu2))
+  ),
+  file.path(base_dir, "Figure3_three_point_sankey_counts.csv")
 )
