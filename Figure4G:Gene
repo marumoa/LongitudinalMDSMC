@@ -1,0 +1,197 @@
+rm(list = ls())
+gc()
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(writexl)
+
+base_dir <- "/Users/marumoatsushi/Desktop/研究・発表2013~/2026MLMatteo/Data/AMData"
+input_file <- file.path(base_dir, "20260327Gene.csv")
+
+df <- read.csv(input_file, check.names = FALSE, fileEncoding = "UTF-8-BOM")
+colnames(df) <- trimws(colnames(df))
+
+df <- df %>%
+  transmute(
+    MRN = as.character(MRN),
+    MC = as.integer(`Cluster at diagnosis`),
+    Gene = as.character(Gene),
+    NewMT = as.integer(NewMT),
+    Increase_VAF = as.integer(`Increase VAF`)
+  ) %>%
+  filter(!is.na(MC), Gene != "")
+
+target_genes <- tibble::tribble(
+  ~MC, ~Gene,
+  2, "ASXL1",
+  2, "STAG2",
+  2, "NRAS",
+  4, "RUNX1",
+  4, "SF3B1",
+  4, "NRAS",
+  6, "TET2",
+  6, "SRSF2",
+  7, "RUNX1",
+  7, "NF1",
+  7, "SRSF2",
+  8, "TP53",
+  9, "ASXL1",
+  9, "RUNX1",
+  9, "PTPN11",
+  9, "SETBP1",
+  9, "SRSF2",
+  9, "STAG2",
+  12, "TET2",
+  12, "RUNX1",
+  12, "STAG2",
+  13, "TP53",
+  13, "PTPN11",
+  13, "RUNX1"
+) %>%
+  group_by(MC) %>%
+  mutate(gene_order = row_number()) %>%
+  ungroup()
+
+cluster_denominators <- df %>%
+  distinct(MC, MRN) %>%
+  count(MC, name = "cluster_patients")
+
+pattern_counts <- df %>%
+  mutate(
+    Pattern = case_when(
+      NewMT == 1 & Increase_VAF == 1 ~ "Both",
+      NewMT == 1 & Increase_VAF == 0 ~ "NewMT",
+      NewMT == 0 & Increase_VAF == 1 ~ "Increase VAF",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Pattern)) %>%
+  semi_join(target_genes, by = c("MC", "Gene")) %>%
+  distinct(MC, Gene, Pattern, MRN) %>%
+  count(MC, Gene, Pattern, name = "patients")
+
+plot_data <- target_genes %>%
+  crossing(Pattern = c("NewMT", "Increase VAF", "Both")) %>%
+  left_join(pattern_counts, by = c("MC", "Gene", "Pattern")) %>%
+  left_join(cluster_denominators, by = "MC") %>%
+  mutate(
+    patients = replace_na(patients, 0L),
+    frequency = patients / cluster_patients,
+    percent = frequency * 100,
+    MC_label = paste0("MC", MC),
+    Pattern = factor(Pattern, levels = c("NewMT", "Increase VAF", "Both"))
+  ) %>%
+  arrange(MC, gene_order, Pattern)
+
+cluster_order <- c(2, 4, 6, 7, 8, 9, 12, 13)
+gene_axis <- target_genes %>%
+  mutate(axis_label = paste0(MC, "__", gene_order, "__", Gene)) %>%
+  pull(axis_label)
+
+plot_data <- plot_data %>%
+  left_join(
+    target_genes %>% mutate(axis_label = paste0(MC, "__", gene_order, "__", Gene)),
+    by = c("MC", "Gene", "gene_order")
+  ) %>%
+  mutate(
+    axis_label = factor(axis_label, levels = gene_axis),
+    MC_label = factor(MC_label, levels = paste0("MC", cluster_order))
+  )
+
+cluster_boundaries <- target_genes %>%
+  group_by(MC) %>%
+  summarise(
+    start = min(gene_order),
+    end = max(gene_order),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    cumulative_start = cumsum(lag(end - start + 1, default = 0)) + 0.5,
+    cumulative_end = cumsum(end - start + 1) + 0.5,
+    label_x = (cumulative_start + cumulative_end) / 2,
+    boundary_x = cumulative_end
+  )
+
+pattern_colors <- c(
+  "NewMT" = "#1f78b4",
+  "Increase VAF" = "#e31a1c",
+  "Both" = "#33a02c"
+)
+
+p <- ggplot(plot_data, aes(x = axis_label, y = frequency, fill = Pattern)) +
+  geom_col(width = 0.72, color = "white", linewidth = 0.2) +
+  geom_vline(
+    data = cluster_boundaries %>% filter(MC != max(MC)),
+    aes(xintercept = boundary_x),
+    inherit.aes = FALSE,
+    linetype = "dashed",
+    color = "grey55",
+    linewidth = 0.35
+  ) +
+  geom_text(
+    data = cluster_boundaries,
+    aes(x = label_x, y = 0.69, label = paste0("MC", MC)),
+    inherit.aes = FALSE,
+    fontface = "bold",
+    color = "grey35",
+    size = 4.2
+  ) +
+  scale_x_discrete(labels = function(x) sub("^.*__", "", x)) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = c(0, 0.72),
+    breaks = seq(0, 0.6, by = 0.2),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  scale_fill_manual(values = pattern_colors, name = "Pattern") +
+  labs(
+    x = NULL,
+    y = "Gene mutation frequency (%)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(size = 9, angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 10),
+    axis.title.y = element_text(size = 12, face = "bold"),
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    plot.margin = margin(12, 16, 18, 16)
+  )
+
+print(p)
+
+output_jpeg <- file.path(base_dir, "20260327Gene_MC_progression_gene_patterns_barplot.jpeg")
+output_tiff <- file.path(base_dir, "20260327Gene_MC_progression_gene_patterns_barplot.tiff")
+output_csv <- file.path(base_dir, "20260327Gene_MC_progression_gene_patterns_summary.csv")
+output_xlsx <- file.path(base_dir, "20260327Gene_MC_progression_gene_patterns_summary.xlsx")
+
+ggsave(output_jpeg, p, width = 13, height = 4, dpi = 600)
+ggsave(output_tiff, p, width = 13, height = 4, dpi = 600, compression = "lzw")
+
+write.csv(plot_data, output_csv, row.names = FALSE)
+
+qc <- tibble::tibble(
+  item = c("input_rows", "unique_patients", "clusters_plotted", "genes_plotted", "pattern_definition"),
+  value = c(
+    as.character(nrow(df)),
+    as.character(length(unique(df$MRN))),
+    paste(cluster_order, collapse = ","),
+    as.character(nrow(target_genes)),
+    "NewMT: NewMT=1 & Increase VAF=0; Increase VAF: NewMT=0 & Increase VAF=1; Both: NewMT=1 & Increase VAF=1"
+  )
+)
+
+write_xlsx(
+  list(
+    Gene_Pattern_Summary = plot_data,
+    Cluster_Denominators = cluster_denominators,
+    QC = qc
+  ),
+  output_xlsx
+)
+
+print(plot_data)
+print(qc)
